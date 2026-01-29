@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>RETRO LASER POP: REFORGED</title>
+    <style>
+        :root { --blue: #00ffe1; --pink: #ff0077; --bg: #05010a; }
+        html, body { 
+            margin: 0; padding: 0; overflow: hidden; background: var(--bg);
+            font-family: 'Courier New', Courier, monospace; 
+            user-select: none; 
+            /* Critical for mobile: stops the browser from trying to handle scrolls/zooms */
+            touch-action: none; 
+            -webkit-touch-callout: none;
+            -webkit-user-select: none;
+        }
+        #ui {
+            position: fixed; inset: 0; pointer-events: none; z-index: 10;
+            display: flex; justify-content: space-between; padding: 15px;
+            color: var(--blue); text-shadow: 0 0 10px var(--blue);
+            /* Account for "notch" on iPhones */
+            padding-top: env(safe-area-inset-top);
+        }
+        .menu {
+            position: fixed; inset: 0; background: rgba(5, 1, 10, 0.95);
+            display: flex; flex-direction: column; align-items: center; justify-content: center;
+            z-index: 50; text-align: center; color: var(--blue);
+        }
+        button {
+            background: transparent; color: var(--blue); border: 2px solid var(--blue);
+            padding: 20px 50px; font-size: 24px; cursor: pointer; font-family: inherit;
+            transition: 0.2s; margin-top: 20px;
+            /* Makes buttons easier to hit on mobile */
+            border-radius: 8px;
+            -webkit-tap-highlight-color: transparent;
+        }
+        .hidden { display: none !important; }
+        canvas { display: block; touch-action: none; }
+    </style>
+</head>
+<body>
+
+    <div id="ui">
+        <div>
+            <div id="scoreDisplay" style="font-size: 28px;">0</div>
+            <div id="comboDisplay" style="font-size: 14px; opacity: 0.8;">COMBO x1</div>
+        </div>
+        <div style="text-align: right;">
+            <div id="livesDisplay" style="font-size: 28px; color: var(--pink);">LIVES: 5</div>
+            <div id="levelDisplay" style="font-size: 12px; opacity: 0.6;">LEVEL 1</div>
+        </div>
+    </div>
+
+    <div id="mainMenu" class="menu">
+        <h1 style="letter-spacing: 4px;">RETRO LASER POP</h1>
+        <p style="font-size: 14px; opacity: 0.7;">TAP THE CIRCLES BEFORE THEY BURST</p>
+        <button onclick="bootGame()">INITIALIZE</button>
+    </div>
+
+    <div id="gameOver" class="menu hidden">
+        <h1 style="color: var(--pink);">CRITICAL ERROR</h1>
+        <p id="finalScore" style="font-size: 24px; color: white;"></p>
+        <button onclick="bootGame()">REBOOT</button>
+    </div>
+
+    <canvas id="canvas"></canvas>
+
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+let w, h, lastT = 0;
+let score = 0, combo = 1, lives = 5, diff = 1;
+let state = 'MENU';
+
+let circles = [], particles = [], texts = [], stars = [], burstQueue = [];
+let spawnTimer = 0, shake = 0, flash = 0;
+
+const COLORS = ['#00ffe1', '#ff0077', '#beff00', '#7000ff', '#ffaa00'];
+
+/**
+ * REVISED RESIZE: 
+ * Ensures the canvas internal resolution matches the physical pixels of the screen.
+ */
+function resize() {
+    const dpr = window.devicePixelRatio || 1;
+    w = window.innerWidth;
+    h = window.innerHeight;
+    canvas.width = w * dpr;
+    canvas.height = h * dpr;
+    canvas.style.width = w + 'px';
+    canvas.style.height = h + 'px';
+    ctx.scale(dpr, dpr);
+    
+    stars = Array.from({length: 40}, () => ({
+        x: Math.random()*w, 
+        y: Math.random()*h, 
+        s: Math.random()*2, 
+        v: 0.5 + Math.random()
+    }));
+}
+window.addEventListener('resize', resize);
+resize();
+
+// Optimized Audio (Unlocks on first interaction)
+const A = new (window.AudioContext || window.webkitAudioContext)();
+function sfx(f, d, v, type='sine') {
+    if(A.state === 'suspended') A.resume();
+    const o = A.createOscillator(), g = A.createGain();
+    o.type = type; o.frequency.setValueAtTime(f, A.currentTime);
+    o.frequency.exponentialRampToValueAtTime(10, A.currentTime + d);
+    g.gain.setValueAtTime(v, A.currentTime);
+    g.gain.linearRampToValueAtTime(0, A.currentTime + d);
+    o.connect(g); g.connect(A.destination);
+    o.start(); o.stop(A.currentTime + d);
+}
+
+function bootGame() {
+    if(A.state === 'suspended') A.resume();
+    score = 0; combo = 1; lives = 5; diff = 1;
+    circles = []; particles = []; texts = []; burstQueue = [];
+    state = 'PLAYING';
+    document.querySelectorAll('.menu').forEach(m => m.classList.add('hidden'));
+}
+
+function loop(t) {
+    const dt = Math.min(t - lastT, 50);
+    lastT = t;
+    if (state === 'PLAYING') update(dt);
+    draw();
+    requestAnimationFrame(loop);
+}
+
+function update(dt) {
+    diff += 0.00004 * dt;
+    spawnTimer -= dt;
+    if (spawnTimer <= 0) {
+        const count = Math.random() * diff > 3 ? 2 : 1;
+        for(let i=0; i<count; i++) {
+            burstQueue.push({
+                x: 50 + Math.random()*(w-100),
+                y: 50 + Math.random()*(h-100),
+                c: COLORS[Math.floor(Math.random()*COLORS.length)],
+                t: i * 200 
+            });
+        }
+        spawnTimer = Math.max(500, 2000 / Math.pow(diff, 0.7));
+    }
+
+    for(let i=burstQueue.length-1; i>=0; i--) {
+        burstQueue[i].t -= dt;
+        if(burstQueue[i].t <= 0) {
+            const b = burstQueue[i];
+            circles.push({ x: b.x, y: b.y, s: 0.1, c: b.c, v: 0.0006 * Math.pow(diff, 0.6) });
+            burstQueue.splice(i, 1);
+        }
+    }
+
+    for (let i = circles.length - 1; i >= 0; i--) {
+        const c = circles[i];
+        c.s += c.v * dt;
+        if (c.s >= 1.5) {
+            circles.splice(i, 1);
+            lives--; flash = 0.5; shake = 20;
+            sfx(100, 0.4, 0.2, 'sawtooth');
+            if (lives <= 0) {
+                state = 'GAMEOVER';
+                document.getElementById('gameOver').classList.remove('hidden');
+                document.getElementById('finalScore').innerText = "TOTAL SCORE: " + Math.floor(score);
+            }
+        }
+    }
+
+    for(let i=particles.length-1; i>=0; i--) {
+        const p = particles[i];
+        p.x += p.vx; p.y += p.vy; p.l -= 0.02; 
+        if(p.l <= 0) particles.splice(i, 1);
+    }
+    
+    for(let i=texts.length-1; i>=0; i--) {
+        const tx = texts[i];
+        tx.y -= 1; tx.l -= 0.02; 
+        if(tx.l <= 0) texts.splice(i, 1);
+    }
+
+    if (shake > 0) shake *= 0.9;
+    if (flash > 0) flash *= 0.9;
+}
+
+function draw() {
+    ctx.save();
+    if (shake > 1) ctx.translate(Math.random()*shake-shake/2, Math.random()*shake-shake/2);
+
+    ctx.fillStyle = '#05010a';
+    ctx.fillRect(0, 0, w, h);
+
+    // Subtle Stars
+    ctx.fillStyle = '#ffffff22';
+    stars.forEach(s => { ctx.fillRect(s.x, (s.y += s.v) % h, s.s, s.s); });
+
+    if (flash > 0.01) { ctx.fillStyle = `rgba(255,0,0,${flash})`; ctx.fillRect(0,0,w,h); }
+
+    // Optimized Circle Drawing
+    circles.forEach(c => {
+        ctx.beginPath(); 
+        ctx.arc(c.x, c.y, 45 * c.s, 0, Math.PI * 2);
+        // Using semi-transparent fill for a "neon" look without heavy shadows
+        ctx.fillStyle = c.c + "44"; 
+        ctx.fill();
+        ctx.strokeStyle = c.c;
+        ctx.lineWidth = 3;
+        ctx.stroke();
+        
+        if (c.s > 1.25 && Math.floor(lastT/100)%2) {
+            ctx.strokeStyle = '#fff'; ctx.lineWidth = 5; ctx.stroke();
+        }
+    });
+
+    ctx.font = "bold 16px Courier New";
+    texts.forEach(tx => { ctx.fillStyle = `rgba(255,255,255,${tx.l})`; ctx.fillText(tx.n, tx.x, tx.y); });
+    
+    // Draw particles as small circles or rectangles
+    particles.forEach(p => { 
+        ctx.globalAlpha = p.l; 
+        ctx.fillStyle = p.c; 
+        ctx.fillRect(p.x, p.y, 3, 3); 
+    });
+    ctx.globalAlpha = 1;
+
+    ctx.restore();
+
+    if(state === 'PLAYING') {
+        document.getElementById('scoreDisplay').innerText = Math.floor(score);
+        document.getElementById('comboDisplay').innerText = `COMBO x${combo}`;
+        document.getElementById('livesDisplay').innerText = `LIVES: ${lives}`;
+        document.getElementById('levelDisplay').innerText = `LEVEL ${Math.floor(diff)}`;
+    }
+}
+
+/**
+ * MOBILE HITBOX LOGIC:
+ * Fingers are less precise than mice. Added a "Grace Radius" 
+ * so the game feels fair even if the user just misses the center.
+ */
+window.addEventListener('pointerdown', (e) => {
+    if (state !== 'PLAYING') return;
+    
+    // Prevent default browser behavior
+    if(e.cancelable) e.preventDefault();
+
+    let hit = false;
+    // Mobile "Grace Area" - adds 20px of extra touch forgiveness
+    const touchGrace = 25; 
+
+    for (let i = circles.length - 1; i >= 0; i--) {
+        const c = circles[i];
+        const dist = Math.hypot(e.clientX - c.x, e.clientY - c.y);
+        const radius = (45 * c.s) + touchGrace;
+
+        if (dist < radius) {
+            hit = true;
+            const p = (c.s > 1.25 ? 100 : 25) * combo;
+            score += p;
+            texts.push({ x: c.x, y: c.y, n: "+"+p, l: 1 });
+            combo++;
+            shake = c.s > 1.25 ? 12 : 4;
+            sfx(c.s > 1.25 ? 1200 : 800, 0.15, 0.1);
+            for(let j=0; j<8; j++) {
+                particles.push({ 
+                    x:c.x, y:c.y, 
+                    vx:(Math.random()-0.5)*10, 
+                    vy:(Math.random()-0.5)*10, 
+                    l:1, c:c.c 
+                });
+            }
+            circles.splice(i, 1);
+            break;
+        }
+    }
+    if (!hit) { 
+        combo = 1; 
+        shake = 5; 
+        sfx(200, 0.1, 0.1, 'triangle'); 
+    }
+}, { passive: false });
+
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
